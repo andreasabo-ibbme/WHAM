@@ -8,11 +8,11 @@ git clone https://github.com/yohanshin/WHAM.git --recursive
 cd WHAM/
 
 # Create Conda environment
-conda create -n wham python=3.9
-conda activate wham
+conda create -n wham_conda python=3.9
+conda activate wham_conda
 
 # Install PyTorch libraries
-conda install pytorch==1.11.0 torchvision==0.12.0 torchaudio==0.11.0 cudatoolkit=11.3 -c pytorch
+conda install pytorch==1.11.0 torchvision==0.12.0 torchaudio==0.11.0 cudatoolkit=11.3 -c pytorch -y
 
 # Install PyTorch3D (optional) for visualization
 conda install -c fvcore -c iopath -c conda-forge fvcore iopath
