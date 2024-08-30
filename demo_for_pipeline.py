@@ -3,6 +3,7 @@ import argparse
 import os.path as osp
 from glob import glob
 from collections import defaultdict
+import sys
 
 import cv2
 import torch
@@ -21,11 +22,14 @@ from lib.models.preproc.extractor import FeatureExtractor
 from lib.models.smplify import TemporalSMPLify
 
 
-AMB_ID = "AB10"
+AMB_ID = "AB16"
+sys.setrecursionlimit(5000)
 
 INPUT_FOLDER = r"/home/saboa/mnt/n_drive/AMBIENT/AMBIENT_Belmont/" + AMB_ID
 OUTPUT_FOLDER_BASE = r"/home/saboa/mnt/n_drive/AMBIENT/AMBIENT_Belmont_posetracked/WHAM/" + AMB_ID
-
+SAVE_PKL=True
+VISUALIZE=True
+RUN_SMPLFY = True
 
 try: 
     from lib.models.preproc.slam import SLAMModel
@@ -215,18 +219,22 @@ if __name__ == '__main__':
     cfg = get_cfg_defaults()
     cfg.merge_from_file('configs/yamls/demo.yaml')
     
+    args.save_pkl=SAVE_PKL
+    args.run_smplify=RUN_SMPLFY
+    args.visualize=VISUALIZE
 
     logger.info(f'GPU name -> {torch.cuda.get_device_name()}')
     logger.info(f'GPU feat -> {torch.cuda.get_device_properties("cuda")}')    
     
-    all_vids = glob(osp.join(INPUT_FOLDER, "*.h264"))
+    all_vids = glob(osp.join(INPUT_FOLDER, "*.mp4"))
+    all_vids.extend(glob(osp.join(INPUT_FOLDER, "*.h264")))
 
     # ========= Load WHAM ========= #
     smpl_batch_size = cfg.TRAIN.BATCH_SIZE * cfg.DATASET.SEQLEN
     smpl = build_body_model(cfg.DEVICE, smpl_batch_size)
     network = build_network(cfg, smpl)
     network.eval()
-    
+    print(sys.getrecursionlimit())
     # Output folder
     for i, vid in enumerate(all_vids):
         logger.info(f"processing: {i}/{len(all_vids)}")
@@ -244,7 +252,7 @@ if __name__ == '__main__':
             args.calib, 
             run_global=not args.estimate_local_only, 
             save_pkl=args.save_pkl,
-            visualize=args.visualize)
+            visualize=True)
             
         print()
     logger.info('Done !')
