@@ -22,11 +22,13 @@ from lib.models.preproc.extractor import FeatureExtractor
 from lib.models.smplify import TemporalSMPLify
 
 
-AMB_ID = "AB16"
+# AMB_IDS = ["AB10", "AB16", "AB15", "AB14", "AB13", "AB12", "AB11",
+#            "AB01", "AB02", "AB03", "AB04", "AB05", "AB06", "AB07", "AB08", "AB09"]
+AMB_IDS = ["AB01", "AB02", "AB03", "AB04", "AB05", "AB06", "AB07", "AB08", "AB09", "AB10", "AB11", "AB12", "AB13", "AB14", "AB15", "AB16"]
+# AMB_IDS = ["AB01"]
 sys.setrecursionlimit(5000)
 
-INPUT_FOLDER = r"/home/saboa/mnt/n_drive/AMBIENT/AMBIENT_Belmont/" + AMB_ID
-OUTPUT_FOLDER_BASE = r"/home/saboa/mnt/n_drive/AMBIENT/AMBIENT_Belmont_posetracked/WHAM/" + AMB_ID
+
 SAVE_PKL=True
 VISUALIZE=True
 RUN_SMPLFY = True
@@ -225,34 +227,52 @@ if __name__ == '__main__':
 
     logger.info(f'GPU name -> {torch.cuda.get_device_name()}')
     logger.info(f'GPU feat -> {torch.cuda.get_device_properties("cuda")}')    
-    
-    all_vids = glob(osp.join(INPUT_FOLDER, "*.mp4"))
-    all_vids.extend(glob(osp.join(INPUT_FOLDER, "*.h264")))
-
-    # ========= Load WHAM ========= #
-    smpl_batch_size = cfg.TRAIN.BATCH_SIZE * cfg.DATASET.SEQLEN
-    smpl = build_body_model(cfg.DEVICE, smpl_batch_size)
-    network = build_network(cfg, smpl)
-    network.eval()
-    print(sys.getrecursionlimit())
-    # Output folder
-    for i, vid in enumerate(all_vids):
-        logger.info(f"processing: {i}/{len(all_vids)}")
-        sequence = '.'.join(vid.split('/')[-1].split('.')[:-1])
-        output_pth = osp.join(OUTPUT_FOLDER_BASE, sequence)
-        if osp.exists(output_pth):
-            continue
-        
-        os.makedirs(output_pth, exist_ok=True)
-
-        run(cfg, 
-            vid, 
-            output_pth, 
-            network, 
-            args.calib, 
-            run_global=not args.estimate_local_only, 
-            save_pkl=args.save_pkl,
-            visualize=True)
+    num_vids = 0
+    for AMB_ID in AMB_IDS:
+        INPUT_FOLDER = r"/home/saboa/mnt/n_drive/AMBIENT/AMBIENT_Belmont/" + AMB_ID
+        OUTPUT_FOLDER_BASE = r"/home/saboa/mnt/n_drive/AMBIENT/AMBIENT_Belmont_posetracked/WHAM/" + AMB_ID
+        all_vids = glob(osp.join(INPUT_FOLDER, "*.mp4"))
+        all_vids.extend(glob(osp.join(INPUT_FOLDER, "*.h264")))
+        print(len(all_vids))
+        num_vids += len(all_vids)
+        # ========= Load WHAM ========= #
+        smpl_batch_size = cfg.TRAIN.BATCH_SIZE * cfg.DATASET.SEQLEN
+        smpl = build_body_model(cfg.DEVICE, smpl_batch_size)
+        network = build_network(cfg, smpl)
+        network.eval()
+        print(sys.getrecursionlimit())
+        # Output folder
+        for i, vid in enumerate(all_vids):
+            logger.info(f"processing: {i}/{len(all_vids)}")
+            sequence = '.'.join(vid.split('/')[-1].split('.')[:-1])
+            output_pth = osp.join(OUTPUT_FOLDER_BASE, sequence)
             
-        print()
+            if osp.exists(osp.join(output_pth, "output.mp4")):
+                continue
+            else:
+                print("processing: ", output_pth)
+            # try:
+            #     # Check if the one after exists
+            #     next_sequence = '.'.join(all_vids[i+1].split('/')[-1].split('.')[:-1])
+            #     next_output_path = osp.join(OUTPUT_FOLDER_BASE, next_sequence)
+            #     if osp.exists(next_output_path):
+            #         continue
+            # except:
+            #     # Last one in list
+            #     if osp.exists(output_pth):
+            #         continue
+            
+            os.makedirs(output_pth, exist_ok=True)
+
+            run(cfg, 
+                vid, 
+                output_pth, 
+                network, 
+                args.calib, 
+                run_global=not args.estimate_local_only, 
+                save_pkl=args.save_pkl,
+                visualize=True)
+                
+            print()
+    logger.info(f"Processed: {num_vids} vids")
     logger.info('Done !')
