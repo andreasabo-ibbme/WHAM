@@ -25,6 +25,13 @@ from lib.models.smplify import TemporalSMPLify
 # AMB_IDS = ["AB10", "AB16", "AB15", "AB14", "AB13", "AB12", "AB11",
 #            "AB01", "AB02", "AB03", "AB04", "AB05", "AB06", "AB07", "AB08", "AB09"]
 AMB_IDS = ["AB01", "AB02", "AB03", "AB04", "AB05", "AB06", "AB07", "AB08", "AB09", "AB10", "AB11", "AB12", "AB13", "AB14", "AB15", "AB16"]
+AMB_IDS = ["BlurCheckOct2024"]
+
+INPUT_FOLDER_ROOT = r"/home/saboa/mnt/n_drive/AMBIENT/AMBIENT_Belmont/Sample Videos for Test Cases"
+# INPUT_FOLDER_ROOT = r"/home/saboa/mnt/n_drive/AMBIENT/AMBIENT_Belmont"
+OUTPUT_FOLDER_ROOT = r"/home/saboa/mnt/n_drive/AMBIENT/AMBIENT_Belmont_posetracked/WHAM"
+
+
 # AMB_IDS = ["AB01"]
 sys.setrecursionlimit(5000)
 
@@ -229,8 +236,8 @@ if __name__ == '__main__':
     logger.info(f'GPU feat -> {torch.cuda.get_device_properties("cuda")}')    
     num_vids = 0
     for AMB_ID in AMB_IDS:
-        INPUT_FOLDER = r"/home/saboa/mnt/n_drive/AMBIENT/AMBIENT_Belmont/" + AMB_ID
-        OUTPUT_FOLDER_BASE = r"/home/saboa/mnt/n_drive/AMBIENT/AMBIENT_Belmont_posetracked/WHAM/" + AMB_ID
+        INPUT_FOLDER = os.path.join(INPUT_FOLDER_ROOT, AMB_ID)
+        OUTPUT_FOLDER_BASE = os.path.join(OUTPUT_FOLDER_ROOT, AMB_ID)
         all_vids = glob(osp.join(INPUT_FOLDER, "*.mp4"))
         all_vids.extend(glob(osp.join(INPUT_FOLDER, "*.h264")))
         print(len(all_vids))
