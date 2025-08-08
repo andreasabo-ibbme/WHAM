@@ -13,6 +13,7 @@ from loguru import logger
 from progress.bar import Bar
 
 from configs.config import get_cfg_defaults
+
 from lib.data.datasets import CustomDataset
 from lib.utils.imutils import avg_preds
 from lib.utils.transforms import matrix_to_axis_angle
@@ -44,14 +45,17 @@ AMB_IDS = [
     "AB17",
     "AB18",
 ]
+# AMB_IDS = ["AB02"]
 # AMB_IDS = ["BlurCheckOct2024"]
 
 # INPUT_FOLDER_ROOT = r"/home/saboa/mnt/n_drive/AMBIENT/AMBIENT_Belmont/Sample Videos for Test Cases"
 INPUT_FOLDER_ROOT = r"/home/saboa/mnt/ndrive_andrea/AMBIENT/AMBIENT_Belmont"
 OUTPUT_FOLDER_ROOT = (
-    r"/home/saboa/mnt/ndrive_andrea/AMBIENT/AMBIENT_Belmont_posetracked/WHAM"
+    r"/home/saboa/mnt/ndrive_andrea/AMBIENT/AMBIENT_Belmont_posetracked/WHAM_30FPS"
 )
 
+START_DATE = "20240225"
+STOP_DATE = "20241008"
 
 # AMB_IDS = ["AB01"]
 sys.setrecursionlimit(5000)
@@ -295,10 +299,13 @@ def run(
             (pred["verts_cam"] + pred["trans_cam"].unsqueeze(1)).cpu().numpy()
         )
         results[_id]["frame_ids"] = frame_id
+        results["metadata"]["fps"] = fps
+        results["metadata"]["input_filename"] = video
 
     if save_pkl:
         joblib.dump(results, osp.join(output_pth, "wham_output.pkl"))
 
+    print("starting visualization")
     # Visualize
     if visualize:
         try:
@@ -310,6 +317,18 @@ def run(
                 )
         except Exception as e:
             print(e)
+
+
+def filter_by_date(all_vids):
+    vids = [
+        vid
+        for vid in all_vids
+        if (
+            os.path.split(vid)[-1][5:13] >= START_DATE
+            and os.path.split(vid)[-1][5:13] <= STOP_DATE
+        )
+    ]
+    return vids
 
 
 if __name__ == "__main__":
@@ -370,13 +389,18 @@ if __name__ == "__main__":
 
     logger.info(f"GPU name -> {torch.cuda.get_device_name()}")
     logger.info(f'GPU feat -> {torch.cuda.get_device_properties("cuda")}')
+    num_vids_all = 0
     num_vids = 0
     for AMB_ID in AMB_IDS:
         INPUT_FOLDER = os.path.join(INPUT_FOLDER_ROOT, AMB_ID)
         OUTPUT_FOLDER_BASE = os.path.join(OUTPUT_FOLDER_ROOT, AMB_ID)
         all_vids = glob(osp.join(INPUT_FOLDER, "*.mp4"))
-        all_vids.extend(glob(osp.join(INPUT_FOLDER, "*.h264")))
+        # all_vids.extend(glob(osp.join(INPUT_FOLDER, "*.h264")))
         print(len(all_vids))
+        num_vids_all += len(all_vids)
+        all_vids = filter_by_date(all_vids)
+        print(len(all_vids))
+        # print(sorted(all_vids))
         num_vids += len(all_vids)
         # ========= Load WHAM ========= #
         smpl_batch_size = cfg.TRAIN.BATCH_SIZE * cfg.DATASET.SEQLEN
@@ -418,8 +442,7 @@ if __name__ == "__main__":
                     save_pkl=args.save_pkl,
                     visualize=True,
                 )
-                quit()
             except Exception as e:
                 print(e)
-    logger.info(f"Processed: {num_vids} vids")
+    logger.info(f"Processed: {num_vids} vids out of {num_vids_all} total")
     logger.info("Done !")
