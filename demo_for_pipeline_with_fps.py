@@ -55,7 +55,7 @@ OUTPUT_FOLDER_ROOT = (
 )
 
 START_DATE = "20240225"
-STOP_DATE = "20241008"
+STOP_DATE = "20261008"
 
 # AMB_IDS = ["AB01"]
 sys.setrecursionlimit(5000)
