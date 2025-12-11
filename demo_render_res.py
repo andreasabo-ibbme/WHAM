@@ -1,0 +1,517 @@
+import os
+import argparse
+import os.path as osp
+from glob import glob
+from collections import defaultdict
+import sys
+
+import numpy as np
+
+import cv2
+import torch
+import joblib
+from loguru import logger
+from progress.bar import Bar
+
+from configs.config import get_cfg_defaults
+
+from lib.data.datasets import CustomDataset
+from lib.utils.imutils import avg_preds
+from lib.utils.transforms import matrix_to_axis_angle
+from lib.models import build_network, build_body_model
+from lib.models.preproc.detector import DetectionModel
+from lib.models.preproc.extractor import FeatureExtractor
+from lib.models.smplify import TemporalSMPLify
+from icecream import ic
+
+# AMB_IDS = ["AB10", "AB16", "AB15", "AB14", "AB13", "AB12", "AB11",
+#            "AB01", "AB02", "AB03", "AB04", "AB05", "AB06", "AB07", "AB08", "AB09"]
+AMB_IDS = [
+    # "AB01",
+    # "AB02",
+    # "AB03",
+    # "AB04",
+    # "AB05",
+    # "AB06",
+    # "AB07",
+    # "AB08",
+    # "AB09",
+    # "AB10",
+    # "AB11",
+    # "AB12",
+    # "AB13",
+    # "AB14",
+    "AB15",
+    # "AB16",
+    # "AB17",
+    # "AB18",
+]
+# AMB_IDS = ["AB02"]
+# AMB_IDS = ["BlurCheckOct2024"]
+
+# INPUT_FOLDER_ROOT = r"/home/saboa/mnt/n_drive/AMBIENT/AMBIENT_Belmont/Sample Videos for Test Cases"
+INPUT_FOLDER_ROOT = r"/home/saboa/mnt/ndrive_andrea/AMBIENT/AMBIENT_Belmont"
+OUTPUT_FOLDER_ROOT = (
+    r"/home/saboa/mnt/ndrive_andrea/AMBIENT/AMBIENT_Belmont_posetracked/WHAM_30FPS"
+)
+
+START_DATE = "20240101"
+STOP_DATE = "20250101"
+
+# AMB_IDS = ["AB01"]
+sys.setrecursionlimit(5000)
+
+
+SAVE_PKL = True
+VISUALIZE = True
+RUN_SMPLFY = True
+
+try:
+    from lib.models.preproc.slam import SLAMModel
+
+    _run_global = True
+except:
+    logger.info("DPVO is not properly installed. Only estimate in local coordinates !")
+    _run_global = False
+
+
+def render_vid_main(cfg, video, input_pkl, output_pth, smpl, run_global=True):
+    results = joblib.load(input_pkl)
+    run_global = True
+    try:
+        from lib.vis.run_vis import run_vis_on_demo_prompthmr
+
+        with torch.no_grad():
+            run_vis_on_demo_prompthmr(
+                cfg, video, results, output_pth, smpl, vis_global=run_global
+            )
+    except Exception as e:
+        print(e)
+
+
+def run(
+    cfg,
+    video,
+    output_pth,
+    network,
+    calib=None,
+    run_global=True,
+    save_pkl=False,
+    visualize=False,
+):
+
+    cap = cv2.VideoCapture(video)
+    assert cap.isOpened(), f"Faild to load video file {video}"
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    length = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    width, height = cap.get(cv2.CAP_PROP_FRAME_WIDTH), cap.get(
+        cv2.CAP_PROP_FRAME_HEIGHT
+    )
+
+    # Whether or not estimating motion in global coordinates
+    run_global = run_global and _run_global
+
+    # Preprocess
+    with torch.no_grad():
+        if not (
+            osp.exists(osp.join(output_pth, "tracking_results.pth"))
+            and osp.exists(osp.join(output_pth, "slam_results.pth"))
+        ):
+            print(cfg.DEVICE.lower())
+            detector = DetectionModel(cfg.DEVICE.lower())
+            extractor = FeatureExtractor(cfg.DEVICE.lower(), cfg.FLIP_EVAL)
+
+            if run_global:
+                slam = SLAMModel(video, output_pth, width, height, calib)
+            else:
+                slam = None
+
+            bar = Bar("Preprocess: 2D detection and SLAM", fill="#", max=length)
+            while cap.isOpened():
+                flag, img = cap.read()
+                if not flag:
+                    break
+
+                # 2D detection and tracking
+                detector.track(img, fps, length)
+
+                # SLAM
+                if slam is not None:
+                    slam.track()
+
+                bar.next()
+
+            tracking_results = detector.process(fps)
+
+            if slam is not None:
+                slam_results = slam.process()
+            else:
+                slam_results = np.zeros((length, 7))
+                slam_results[:, 3] = 1.0  # Unit quaternion
+
+            # Extract image features
+            # TODO: Merge this into the previous while loop with an online bbox smoothing.
+            tracking_results = extractor.run(video, tracking_results)
+            logger.info("Complete Data preprocessing!")
+
+            # Save the processed data
+            joblib.dump(tracking_results, osp.join(output_pth, "tracking_results.pth"))
+            joblib.dump(slam_results, osp.join(output_pth, "slam_results.pth"))
+            logger.info(f"Save processed data at {output_pth}")
+
+        # If the processed data already exists, load the processed data
+        else:
+            tracking_results = joblib.load(osp.join(output_pth, "tracking_results.pth"))
+            slam_results = joblib.load(osp.join(output_pth, "slam_results.pth"))
+            logger.info(
+                f"Already processed data exists at {output_pth} ! Load the data ."
+            )
+
+    # Build dataset
+    dataset = CustomDataset(cfg, tracking_results, slam_results, width, height, fps)
+
+    # run WHAM
+    results = defaultdict(dict)
+
+    n_subjs = len(dataset)
+    for subj in range(n_subjs):
+
+        with torch.no_grad():
+            if cfg.FLIP_EVAL:
+                # Forward pass with flipped input
+                flipped_batch = dataset.load_data(subj, True)
+                (
+                    _id,
+                    x,
+                    inits,
+                    features,
+                    mask,
+                    init_root,
+                    cam_angvel,
+                    frame_id,
+                    kwargs,
+                ) = flipped_batch
+                flipped_pred = network(
+                    x,
+                    inits,
+                    features,
+                    mask=mask,
+                    init_root=init_root,
+                    cam_angvel=cam_angvel,
+                    return_y_up=True,
+                    **kwargs,
+                )
+
+                # Forward pass with normal input
+                batch = dataset.load_data(subj)
+                (
+                    _id,
+                    x,
+                    inits,
+                    features,
+                    mask,
+                    init_root,
+                    cam_angvel,
+                    frame_id,
+                    kwargs,
+                ) = batch
+                pred = network(
+                    x,
+                    inits,
+                    features,
+                    mask=mask,
+                    init_root=init_root,
+                    cam_angvel=cam_angvel,
+                    return_y_up=True,
+                    **kwargs,
+                )
+
+                # Merge two predictions
+                flipped_pose, flipped_shape = flipped_pred["pose"].squeeze(
+                    0
+                ), flipped_pred["betas"].squeeze(0)
+                pose, shape = pred["pose"].squeeze(0), pred["betas"].squeeze(0)
+                flipped_pose, pose = flipped_pose.reshape(-1, 24, 6), pose.reshape(
+                    -1, 24, 6
+                )
+                avg_pose, avg_shape = avg_preds(
+                    pose, shape, flipped_pose, flipped_shape
+                )
+                avg_pose = avg_pose.reshape(-1, 144)
+                avg_contact = (
+                    flipped_pred["contact"][..., [2, 3, 0, 1]] + pred["contact"]
+                ) / 2
+
+                # Refine trajectory with merged prediction
+                network.pred_pose = avg_pose.view_as(network.pred_pose)
+                network.pred_shape = avg_shape.view_as(network.pred_shape)
+                network.pred_contact = avg_contact.view_as(network.pred_contact)
+                output = network.forward_smpl(**kwargs)
+                pred = network.refine_trajectory(output, cam_angvel, return_y_up=True)
+
+            else:
+                # data
+                batch = dataset.load_data(subj)
+                (
+                    _id,
+                    x,
+                    inits,
+                    features,
+                    mask,
+                    init_root,
+                    cam_angvel,
+                    frame_id,
+                    kwargs,
+                ) = batch
+
+                # inference
+                pred = network(
+                    x,
+                    inits,
+                    features,
+                    mask=mask,
+                    init_root=init_root,
+                    cam_angvel=cam_angvel,
+                    return_y_up=True,
+                    **kwargs,
+                )
+
+        # if False:
+        if args.run_smplify:
+            smplify = TemporalSMPLify(
+                smpl, img_w=width, img_h=height, device=cfg.DEVICE
+            )
+            input_keypoints = dataset.tracking_results[_id]["keypoints"]
+            pred = smplify.fit(pred, input_keypoints, **kwargs)
+
+            with torch.no_grad():
+                network.pred_pose = pred["pose"]
+                network.pred_shape = pred["betas"]
+                network.pred_cam = pred["cam"]
+                output = network.forward_smpl(**kwargs)
+                pred = network.refine_trajectory(output, cam_angvel, return_y_up=True)
+
+        # ========= Store results ========= #
+        pred_body_pose = (
+            matrix_to_axis_angle(pred["poses_body"]).cpu().numpy().reshape(-1, 69)
+        )
+        pred_root = (
+            matrix_to_axis_angle(pred["poses_root_cam"]).cpu().numpy().reshape(-1, 3)
+        )
+        pred_root_world = (
+            matrix_to_axis_angle(pred["poses_root_world"]).cpu().numpy().reshape(-1, 3)
+        )
+        pred_pose = np.concatenate((pred_root, pred_body_pose), axis=-1)
+        pred_pose_world = np.concatenate((pred_root_world, pred_body_pose), axis=-1)
+        pred_trans = (pred["trans_cam"] - network.output.offset).cpu().numpy()
+
+        results[_id]["pose"] = pred_pose
+        results[_id]["trans"] = pred_trans
+        results[_id]["pose_world"] = pred_pose_world
+        results[_id]["trans_world"] = pred["trans_world"].cpu().squeeze(0).numpy()
+        results[_id]["betas"] = pred["betas"].cpu().squeeze(0).numpy()
+        results[_id]["verts"] = (
+            (pred["verts_cam"] + pred["trans_cam"].unsqueeze(1)).cpu().numpy()
+        )
+        results[_id]["frame_ids"] = frame_id
+        results["metadata"]["fps"] = fps
+        results["metadata"]["input_filename"] = video
+
+    if save_pkl:
+        joblib.dump(results, osp.join(output_pth, "wham_output.pkl"))
+
+    print("starting visualization")
+    # Visualize
+    if visualize:
+        try:
+            from lib.vis.run_vis import run_vis_on_demo
+
+            with torch.no_grad():
+                run_vis_on_demo(
+                    cfg, video, results, output_pth, network.smpl, vis_global=run_global
+                )
+        except Exception as e:
+            print(e)
+
+
+def filter_by_date(all_vids):
+    vids = [
+        vid
+        for vid in all_vids
+        if (
+            os.path.split(vid)[-1][5:13] >= START_DATE
+            and os.path.split(vid)[-1][5:13] <= STOP_DATE
+        )
+    ]
+    return vids
+
+
+def print_keys(struct, prefix=""):
+    for key in struct.keys():
+        print(f"{prefix}[{key}]")
+        if isinstance(struct[key], dict):
+            print_keys(struct[key], prefix + "   ")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    args = parser.parse_args()
+
+    cfg = get_cfg_defaults()
+    cfg.merge_from_file("configs/yamls/demo.yaml")
+    smpl_batch_size = cfg.TRAIN.BATCH_SIZE * cfg.DATASET.SEQLEN
+    smpl = build_body_model(cfg.DEVICE, smpl_batch_size)
+
+    input_pkl = r"/home/saboa/mnt/ndrive_andrea/AMBIENT/AMBIENT_Belmont_posetracked/WHAM_30FPS/AB01/AB01_20230711-173513_cam1/wham_output.pkl"
+    results = joblib.load(input_pkl)
+
+    input_pkl_prompthmr = r"/home/saboa/code/PromptHMR/prompt_hmr_output.pkl"
+    results2 = joblib.load(input_pkl_prompthmr)
+
+    # input_pkl_prompthmr2 = r"/home/saboa/code/PromptHMR/prompt_hmr_output_v2.npz"
+    # # results3 = joblib.load(input_pkl_prompthmr2)
+    # results3 = np.load(input_pkl_prompthmr2, allow_pickle=True)
+
+    print_keys(results[0])
+    print("-" * 80)
+    print_keys(results2[0])
+
+    ic(results[0]["pose_world"].shape)
+    ic(results2[0]["pose_world"].shape)
+
+    ic(results[0]["trans_world"].shape)
+    ic(results[0]["trans"].shape)
+    ic(results2[0]["trans_world"].shape)
+
+    ic(results[0]["betas"].shape)
+    ic(results2[0]["betas"].shape)
+
+    ic(type(results[0]["betas"]))
+    ic(type(results2[0]["betas"]))
+    ic(results[0]["verts"].shape)
+    # quit()
+    video = r"/home/saboa/code/PromptHMR/data/examples/EDS003__elbow_l.mp4"
+    input_pkl_prompthmr = r"/home/saboa/code/PromptHMR/prompt_hmr_output.pkl"
+    output_pth = r"prompthmr"
+
+    render_vid_main(cfg, video, input_pkl_prompthmr, output_pth, smpl)
+    quit()
+
+    # parser.add_argument(
+    #     "--video",
+    #     type=str,
+    #     default="examples/demo_video.mp4",
+    #     help="input video path or youtube link",
+    # )
+    # parser.add_argument(
+    #     "--input_folder",
+    #     type=str,
+    #     default=None,
+    #     help="input video path or youtube link",
+    # )
+
+    # parser.add_argument(
+    #     "--output_pth",
+    #     type=str,
+    #     default="output/demo",
+    #     help="output folder to write results",
+    # )
+
+    # parser.add_argument(
+    #     "--calib", type=str, default=None, help="Camera calibration file path"
+    # )
+
+    # parser.add_argument(
+    #     "--estimate_local_only",
+    #     action="store_true",
+    #     help="Only estimate motion in camera coordinate if True",
+    # )
+
+    # parser.add_argument(
+    #     "--visualize", action="store_true", help="Visualize the output mesh if True"
+    # )
+
+    # parser.add_argument(
+    #     "--save_pkl", action="store_true", help="Save output as pkl file"
+    # )
+
+    # parser.add_argument(
+    #     "--run_smplify",
+    #     action="store_true",
+    #     help="Run Temporal SMPLify for post processing",
+    # )
+
+    # args = parser.parse_args()
+
+    # cfg = get_cfg_defaults()
+    # cfg.merge_from_file("configs/yamls/demo.yaml")
+
+    # args.save_pkl = SAVE_PKL
+    # args.run_smplify = RUN_SMPLFY
+    # args.visualize = VISUALIZE
+
+    # logger.info(f"GPU name -> {torch.cuda.get_device_name()}")
+    # logger.info(f'GPU feat -> {torch.cuda.get_device_properties("cuda")}')
+    # num_vids_all = 0
+    # num_vids = 0
+    # num_vids_missing = 0
+    # for AMB_ID in AMB_IDS:
+    #     INPUT_FOLDER = os.path.join(INPUT_FOLDER_ROOT, AMB_ID)
+    #     OUTPUT_FOLDER_BASE = os.path.join(OUTPUT_FOLDER_ROOT, AMB_ID)
+    #     all_vids = glob(osp.join(INPUT_FOLDER, "*.mp4"))
+    #     # all_vids.extend(glob(osp.join(INPUT_FOLDER, "*.h264")))
+    #     print(len(all_vids))
+    #     num_vids_all += len(all_vids)
+    #     all_vids = filter_by_date(all_vids)
+    #     print(len(all_vids))
+
+    #     # print(sorted(all_vids))
+    #     num_vids += len(all_vids)
+    #     # ========= Load WHAM ========= #
+    #     smpl_batch_size = cfg.TRAIN.BATCH_SIZE * cfg.DATASET.SEQLEN
+    #     smpl = build_body_model(cfg.DEVICE, smpl_batch_size)
+    #     network = build_network(cfg, smpl)
+    #     network.eval()
+    #     print(sys.getrecursionlimit())
+    #     # Output folder
+    #     for i, vid in enumerate(all_vids):
+    #         logger.info(f"processing: {i}/{len(all_vids)}")
+    #         try:
+    #             sequence = ".".join(vid.split("/")[-1].split(".")[:-1])
+    #             output_pth = osp.join(OUTPUT_FOLDER_BASE, sequence)
+
+    #             if osp.exists(osp.join(output_pth, "output.mp4")):
+    #                 continue
+    #             else:
+    #                 print("processing: ", output_pth)
+    #                 num_vids_missing = num_vids_missing + 1
+
+    #             # try:
+    #             #     # Check if the one after exists
+    #             #     next_sequence = '.'.join(all_vids[i+1].split('/')[-1].split('.')[:-1])
+    #             #     next_output_path = osp.join(OUTPUT_FOLDER_BASE, next_sequence)
+    #             #     if osp.exists(next_output_path):
+    #             #         continue
+    #             # except:
+    #             #     # Last one in list
+    #             #     if osp.exists(output_pth):
+    #             #         continue
+
+    #             os.makedirs(output_pth, exist_ok=True)
+
+    #             run(
+    #                 cfg,
+    #                 vid,
+    #                 output_pth,
+    #                 network,
+    #                 args.calib,
+    #                 run_global=not args.estimate_local_only,
+    #                 save_pkl=args.save_pkl,
+    #                 visualize=True,
+    #             )
+    #         except Exception as e:
+    #             print(e)
+
+    # logger.info(f"Processed: {num_vids} vids out of {num_vids_all} total")
+    # logger.info(f"Have {num_vids_missing} missing videos")
+    # logger.info("Done !")
