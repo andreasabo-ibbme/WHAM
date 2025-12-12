@@ -6,7 +6,7 @@ import torch
 import imageio
 import numpy as np
 from progress.bar import Bar
-
+from icecream import ic
 from lib.vis.renderer import Renderer, get_global_cameras
 
 
@@ -29,7 +29,9 @@ def run_vis_on_demo(cfg, video, results, output_pth, smpl, vis_global=True):
         # setup global coordinate subject
         # current implementation only visualize the subject appeared longest
         n_frames = {
-            k: len(results[k]["frame_ids"]) for k in results.keys() if k != "metadata"
+            k: len(results[k]["frame_ids"])
+            for k in results.keys()
+            if k not in ["metadata", "input_vid"]
         }
         sid = max(n_frames, key=n_frames.get)
         global_output = smpl.get_output(
@@ -133,8 +135,11 @@ def run_vis_on_demo_prompthmr(cfg, video, results, output_pth, smpl, vis_global=
     if vis_global:
         # setup global coordinate subject
         # current implementation only visualize the subject appeared longest
+        ic(results.keys())
         n_frames = {
-            k: len(results[k]["frame_ids"]) for k in results.keys() if k != "metadata"
+            k: len(results[k]["frame_ids"])
+            for k in results.keys()
+            if k not in ["metadata", "input_vid"]
         }
         sid = max(n_frames, key=n_frames.get)
         global_output = smpl.get_output(
@@ -164,14 +169,14 @@ def run_vis_on_demo_prompthmr(cfg, video, results, output_pth, smpl, vis_global=
         # - Top view: position=(0.0, 10.0, 0.0)
         # - Bird's eye: position=(0.0, 15.0, 0.0), distance=10
         global_R, global_T, global_lights = get_global_cameras(
-            verts_glob, cfg.DEVICE, distance=5, position=(0.0, 2.5, 5.0)
+            verts_glob, cfg.DEVICE, distance=5, position=(0.0, 0.0, 5.0)
         )
 
     # build default camera
     default_R, default_T = torch.eye(3), torch.zeros(3)
 
     writer = imageio.get_writer(
-        osp.join(output_pth, "output.mp4"),
+        osp.join(output_pth, "prompt_hmr_v2.mp4"),
         fps=fps,
         mode="I",
         format="FFMPEG",
@@ -191,7 +196,7 @@ def run_vis_on_demo_prompthmr(cfg, video, results, output_pth, smpl, vis_global=
         # render onto the input video
         renderer.create_camera(default_R, default_T)
         for _id, val in results.items():
-            if _id == "metadata":
+            if _id in ["metadata", "input_vid"]:
                 continue
             # render onto the image
             frame_i2 = np.where(val["frame_ids"] == frame_i)[0]
